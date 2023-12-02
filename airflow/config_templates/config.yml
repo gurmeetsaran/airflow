@@ -1637,6 +1637,21 @@
       type: integer
       example: ~
       default: "600"
+    - name: task_queued_timeout
+      description: |
+        Amount of time a task can be in the queued state before being retried or set to failed.
+      version_added: 2.2.0
+      type: float
+      example: ~
+      default: "600.0"
+    - name: task_queued_timeout_check_interval
+      description: |
+        How often to check for tasks that have been in the queued state for
+        longer than `[scheduler] task_queued_timeout`.
+      version_added: 2.2.0
+      type: float
+      example: ~
+      default: "120.0"
     - name: task_publish_max_retries
       description: |
         The Maximum number of retries for publishing task messages to the broker when failing

@@ -143,7 +143,7 @@ class SchedulerJob(BaseJob):
 
         self.max_tis_per_query: int = conf.getint('scheduler', 'max_tis_per_query')
         self.processor_agent: Optional[DagFileProcessorAgent] = None
-
+        self._task_queued_timeout = conf.getfloat("scheduler", "task_queued_timeout")
         self.dagbag = DagBag(dag_folder=self.subdir, read_dags_from_db=True, load_op_links=False)
 
     def register_signals(self) -> None:
@@ -695,6 +695,11 @@ class SchedulerJob(BaseJob):
             self._emit_pool_metrics,
         )
 
+        timers.call_regular_interval(
+            conf.getfloat("scheduler", "task_queued_timeout_check_interval"),
+            self._fail_tasks_stuck_in_queued,
+        )
+
         for loop_count in itertools.count(start=1):
             with Stats.timer() as timer:
 
@@ -1089,6 +1094,42 @@ class SchedulerJob(BaseJob):
         self.processor_agent.send_sla_callback_request_to_execute(
             full_filepath=dag.fileloc, dag_id=dag.dag_id
         )
+
+    @provide_session
+    def _fail_tasks_stuck_in_queued(self, session: Session = None) -> None:
+        """
+        Mark tasks stuck in queued for longer than `task_queued_timeout` as failed.
+
+        Tasks can get stuck in queued for a wide variety of reasons (e.g. celery loses
+        track of a task, a cluster can't further scale up its workers, etc.), but tasks
+        should not be stuck in queued for a long time. This will mark tasks stuck in
+        queued for longer than `self._task_queued_timeout` as failed. If the task has
+        available retries, it will be retried.
+        """
+        self.log.debug("Calling SchedulerJob._fail_tasks_stuck_in_queued method")
+
+        tasks_stuck_in_queued = (
+            session.query(TI)
+            .filter(
+                TI.state == State.QUEUED,
+                TI.queued_dttm < (timezone.utcnow() - timedelta(seconds=self._task_queued_timeout)),
+                TI.queued_by_job_id == self.id,
+            )
+            .all()
+        )
+        try:
+            tis_for_warning_message = self.executor.cleanup_stuck_queued_tasks(tis=tasks_stuck_in_queued)
+            if tis_for_warning_message:
+                task_instance_str = "\n\t".join(tis_for_warning_message)
+                self.log.warning(
+                    "Marked the following %s task instances stuck in queued as failed. "
+                    "If the task instance has available retries, it will be retried.\n\t%s",
+                    len(tasks_stuck_in_queued),
+                    task_instance_str,
+                )
+        except NotImplementedError:
+            self.log.debug("Executor doesn't support cleanup of stuck queued tasks. Skipping.")
+            ...
 
     @provide_session
     def _emit_pool_metrics(self, session: Session = None) -> None:
