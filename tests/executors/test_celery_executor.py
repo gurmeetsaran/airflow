@@ -341,7 +341,6 @@ class TestCeleryExecutor(unittest.TestCase):
         tis = [ti1, ti2]
         executor = celery_executor.CeleryExecutor()
         assert executor.running == set()
-        assert executor.adopted_task_timeouts == {}
         assert executor.tasks == {}
 
         not_adopted_tis = executor.try_adopt_task_instances(tis)
@@ -349,10 +348,6 @@ class TestCeleryExecutor(unittest.TestCase):
         key_1 = TaskInstanceKey(dag.dag_id, task_1.task_id, None, try_number)
         key_2 = TaskInstanceKey(dag.dag_id, task_2.task_id, None, try_number)
         assert executor.running == {key_1, key_2}
-        assert dict(executor.adopted_task_timeouts) == {
-            key_1: queued_dttm + executor.task_adoption_timeout,
-            key_2: queued_dttm + executor.task_adoption_timeout,
-        }
         assert executor.tasks == {key_1: AsyncResult("231"), key_2: AsyncResult("232")}
         assert not_adopted_tis == []
 
@@ -382,6 +377,32 @@ class TestCeleryExecutor(unittest.TestCase):
         assert executor.tasks == {}
         assert executor.running == set()
         assert executor.adopted_task_timeouts == {}
+
+    @pytest.mark.backend("mysql", "postgres")
+    @mock.patch("airflow.executors.celery_executor.CeleryExecutor.fail")
+    def test_cleanup_stuck_queued_tasks(self, mock_fail):
+        start_date = timezone.utcnow() - timedelta(days=2)
+
+        with DAG("test_cleanup_stuck_queued_tasks_failed"):
+            task = BaseOperator(task_id="task_1", start_date=start_date)
+
+        ti = TaskInstance(task=task, run_id=None)
+        ti.external_executor_id = "231"
+        ti.state = State.QUEUED
+        ti.queued_dttm = timezone.utcnow() - timedelta(minutes=30)
+        ti.queued_by_job_id = 1
+        tis = [ti]
+        with _prepare_app() as app:
+            app.control.revoke = mock.MagicMock()
+            executor = celery_executor.CeleryExecutor()
+            executor.job_id = 1
+            executor.running = {ti.key}
+            executor.tasks = {ti.key: AsyncResult("231")}
+            executor.cleanup_stuck_queued_tasks(tis)
+            executor.sync()
+        assert executor.tasks == {}
+        assert app.control.revoke.called_with("231")
+        assert mock_fail.called_once()
 
     @pytest.mark.backend("mysql", "postgres")
     def test_check_for_stalled_adopted_tasks_goes_in_ordered_fashion(self):

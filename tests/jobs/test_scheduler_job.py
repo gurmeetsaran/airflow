@@ -1075,6 +1075,25 @@ class TestSchedulerJob:
         ti2 = dr2.get_task_instance(task_id=op1.task_id, session=session)
         assert ti2.state == State.QUEUED, "Tasks run by Backfill Jobs should not be reset"
 
+    def test_fail_stuck_queued_tasks(self, dag_maker, session):
+        with dag_maker("test_fail_stuck_queued_tasks"):
+            op1 = DummyOperator(task_id="op1")
+
+        dr = dag_maker.create_dagrun()
+        ti = dr.get_task_instance(task_id=op1.task_id, session=session)
+        ti.state = State.QUEUED
+        ti.queued_dttm = timezone.utcnow() - timedelta(minutes=15)
+        session.commit()
+        executor = mock.MagicMock()
+        executor.cleanup_stuck_queued_tasks = mock.MagicMock()
+        self.scheduler_job = SchedulerJob(num_runs=0)
+        self.scheduler_job.processor_agent = executor
+        self.scheduler_job._task_queued_timeout = 300
+
+        self.scheduler_job._fail_tasks_stuck_in_queued()
+
+        executor.cleanup_stuck_queued_tasks.assert_called_once()
+
     @mock.patch('airflow.jobs.scheduler_job.DagFileProcessorAgent')
     def test_executor_end_called(self, mock_processor_agent):
         """
